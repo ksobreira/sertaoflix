@@ -1,0 +1,48 @@
+.page {
+  min-height: 100vh; background: #000;
+  display: flex; align-items: center; justify-content: center;
+  position: relative; overflow: hidden;
+}
+.bg {
+  position: absolute; inset: 0;
+  display: grid; grid-template-columns: repeat(5,1fr); grid-template-rows: repeat(3,1fr);
+  gap: 4px; opacity: .25; pointer-events: none;
+}
+.tile {
+  background: #161616; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 3rem;
+}
+.box {
+  position: relative; z-index: 2;
+  background: rgba(0,0,0,.85); border: 1px solid #333;
+  border-radius: 4px; padding: 52px 60px;
+  width: 100%; max-width: 430px;
+}
+.logo {
+  font-size: 2.2rem; font-weight: 900; letter-spacing: 2px;
+  color: var(--red); margin-bottom: 24px;
+}
+.logo span { color: var(--white); }
+.heading { font-size: 1.8rem; font-weight: 700; margin-bottom: 24px; }
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: 6px; }
+.field input {
+  width: 100%; background: #333; border: 1px solid #444;
+  border-radius: var(--radius); color: var(--white);
+  font-size: 1rem; padding: 13px 15px; outline: none; transition: border-color .2s;
+}
+.field input:focus { border-color: #aaa; }
+.erro { color: #e87c03; font-size: .85rem; margin-bottom: 8px; }
+.btn {
+  width: 100%; background: var(--red); color: var(--white);
+  border: none; border-radius: var(--radius); padding: 15px;
+  font-size: 1rem; font-weight: 700; margin-top: 8px; transition: background .2s;
+}
+.btn:hover { background: var(--red2); }
+.dica {
+  margin-top: 20px; font-size: .78rem; color: var(--muted); text-align: center;
+  line-height: 1.6;
+}
+.dica code { color: #aaa; }
+@media (max-width: 480px) { .box { padding: 36px 24px; } }
