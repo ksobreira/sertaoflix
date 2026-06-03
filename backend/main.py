@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text  # Importante para ler as Views textuais do MySQL
 from typing import List
+from pydantic import BaseModel  # Adicionado para estruturar os dados da compra
 
 import models
 import schema
@@ -27,6 +28,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Modelo de dados que o React vai enviar ao comprar um ingresso
+class CompraIngressoSchema(BaseModel):
+    id_Ingresso: int
+    id_sessao: int
+    id_Cliente: int
+    Assento: str
+    Valor: float
+    Tipo_Desconto: str = "Inteira"
+
+
 @app.get("/")
 def read_root():
     return {"message": "Bem-vindo à API SertaoFlix!"}
@@ -34,7 +45,7 @@ def read_root():
 
 # --- 🎬 ENDPOINT DO CATÁLOGO (HOME) ---
 
-@app.get("/filmes")
+@app.get("/api/filmes")
 def listar_filmes(db: Session = Depends(get_db)):
     # Faz o JOIN automático das tabelas Filme e Sessao para trazer o Horário
     resultados = db.query(models.Filme, models.Sessao.Horario)\
@@ -50,6 +61,66 @@ def listar_filmes(db: Session = Depends(get_db)):
         
     return lista_filmes
 
+
+# --- 🎟️ ENDPOINT PARA COMPRA DE INGRESSOS ---
+
+@app.post("/api/ingressos")
+def realizar_compra(dados: CompraIngressoSchema, db: Session = Depends(get_db)):
+    try:
+        # 1. Insere o ingresso na tabela 'ingresso'
+        query_ingresso = """
+            INSERT INTO sertaoflix.ingresso (id_Ingresso, Valor, Assento, Data_de_compra, id_sessao, Tipo_Desconto)
+            VALUES (:id_ingresso, :valor, :assento, NOW(), :id_sessao, :tipo_desconto)
+        """
+        db.execute(text(query_ingresso), {
+            "id_ingresso": dados.id_Ingresso,
+            "valor": dados.Valor,
+            "assento": dados.Assento,
+            "id_sessao": dados.id_sessao,
+            "tipo_desconto": dados.Tipo_Desconto
+        })
+
+        # 2. Vincula o cliente ao ingresso na tabela intermediária 'ingresso_cliente'
+        # Isso vai disparar automaticamente os seus Triggers do MySQL (fidelidade, etc)
+        query_vinculo = """
+            INSERT INTO sertaoflix.ingresso_cliente (ingresso_id_Ingresso, cliente_id_Cliente)
+            VALUES (:id_ingresso, :id_cliente)
+        """
+        db.execute(text(query_vinculo), {
+            "id_ingresso": dados.id_Ingresso,
+            "id_cliente": dados.id_Cliente
+        })
+
+        # Confirma a transação no banco de dados
+        db.commit()
+        return {"status": "sucesso", "message": f"Ingresso para o assento {dados.Assento} comprado!"}
+
+    except Exception as e:
+        db.rollback()  # Desfaz qualquer inserção parcial se houver erro
+        
+        # Captura as mensagens de erro personalizadas disparadas pelos seus TRIGGERS do MySQL
+        mensagem_erro = str(e)
+        if "Erro:" in mensagem_erro:
+            texto_limpo = mensagem_erro.split("Erro:")[1].split("',")[0].strip()
+            raise HTTPException(status_code=400, detail=texto_limpo)
+            
+        raise HTTPException(status_code=500, detail="Erro interno ao processar a compra no banco.")
+    
+# --- 🪑 ENDPOINT PARA MAPA DE ASSENTOS DA SESSÃO ---
+
+@app.get("/api/assentos/{sessao_id}")
+def obter_assentos_ocupados(sessao_id: int, db: Session = Depends(get_db)):
+    # Busca na tabela 'ingresso' todos os assentos já reservados para esta sessão
+    query = """
+        SELECT Assento FROM sertaoflix.ingresso 
+        WHERE id_sessao = :sessao_id
+    """
+    result = db.execute(text(query), {"sessao_id": sessao_id}).fetchall()
+    
+    # Transforma o resultado em uma lista simples de strings: ["A1", "A2", "B3"]
+    assentos_ocupados = [row[0] for row in result]
+    
+    return assentos_ocupados
 
 # --- 📊 ENDPOINTS DO DASHBOARD (VIEWS DO BANCO) ---
 
