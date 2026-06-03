@@ -1,16 +1,30 @@
 import pandas as pd
 import re
+import random
 import mysql.connector
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO DA CONEXÃO COM O SEU BANCO DE DADOS
+# 1. CONFIGURAÇÃO DA CONEXÃO E PARÂMETROS EXPLICITOS DE CORTE
 # ==============================================================================
 CONFIG_BANCO = {
     "host": "localhost",          
     "user": "root",               
-    "password": "12345678", # COLOQUE A SUA SENHA DO WORKBENCH AQUI
+    "password": "SUA_SENHA_AQUI", # COLOQUE A SUA SENHA DO WORKBENCH AQUI
     "database": "sertaoflix"      
 }
+
+# --- MODIFIQUE O ANO AQUI SE DESEJAR ---
+ANO_FILMES = 2020  
+
+# Se True, traz APENAS o ano acima. 
+# Como pediu para trazer os outros anos por causa das views, deixamos False.
+FILTRAR_POR_ANO_ESTRITO = False  
+
+# Regra de corte para popular as Views com relevância
+MINIMO_VOTOS_RELEVANCIA = 50  
+
+# Semente aleatória para consistência de testes
+random.seed(42)
 
 ARQUIVO_TMDB = "TMDB_movie.csv"
 ARQUIVO_NETFLIX = "netflix_titles.csv"
@@ -53,7 +67,7 @@ def adicionar_ao_lookup(caminho_ficheiro, separador, col_titulo, col_diretor, co
     except FileNotFoundError:
         print(f"Aviso: O ficheiro '{caminho_ficheiro}' não foi encontrado. A ignorar...")
 
-# Executa o mapeamento de metadados das 5 plataformas
+# Executa o mapeamento de metadados das plataformas
 adicionar_ao_lookup(ARQUIVO_NETFLIX, "\t", "Titulo", "director", "cast", "Classificacao_indicativa")
 adicionar_ao_lookup(ARQUIVO_MOVIES_CSV, ",", "name", "director", "star", "rating")
 adicionar_ao_lookup(ARQUIVO_AMAZON, ",", "title", "director", "cast", "rating")
@@ -78,25 +92,50 @@ df_tmdb['revenue'] = pd.to_numeric(df_tmdb['revenue'], errors='coerce')
 df_tmdb['runtime'] = pd.to_numeric(df_tmdb['runtime'], errors='coerce')
 df_tmdb['vote_average'] = pd.to_numeric(df_tmdb['vote_average'], errors='coerce')
 df_tmdb['vote_count'] = pd.to_numeric(df_tmdb['vote_count'], errors='coerce')
-
-# Remove linhas sem ID ou sem contagem de votos válida
 df_tmdb = df_tmdb.dropna(subset=['id', 'vote_count'])
 
-# --- CORTE DE RELEVÂNCIA (MANTER OS 30% MELHORES COM NO MÍNIMO 100 VOTOS) ---
-MINIMO_VOTOS_RELEVANCIA = 50 
-df_tmdb = df_tmdb[df_tmdb['vote_count'] >= MINIMO_VOTOS_RELEVANCIA]
-#df_tmdb = df_tmdb.sort_values(by='vote_count', ascending=False)
-#df_tmdb = df_tmdb.head(int(len(df_tmdb) * 0.30))
-print(f"Quantidade final após o corte dos top 30%: {len(df_tmdb)} filmes.")
+# --- MÁGICA DA FILTRAGEM DE RELEVÂNCIA ADAPTADA ---
+print(f"Quantidade original do TMDB: {len(df_tmdb)} filmes.")
+df_tmdb['release_date_str'] = df_tmdb['release_date'].astype(str)
 
-# Dicionários únicos para IDs relacionais das tabelas base
+if FILTRAR_POR_ANO_ESTRITO:
+    df_tmdb = df_tmdb[df_tmdb['release_date_str'].str.contains(str(ANO_FILMES), na=False)]
+    df_tmdb = df_tmdb[df_tmdb['vote_count'] >= MINIMO_VOTOS_RELEVANCIA]
+else:
+    # REGRA: Mantém o ano alvo OU qualquer outro filme com mais de 50 votos para popular as views
+    df_tmdb = df_tmdb[(df_tmdb['release_date_str'].str.contains(str(ANO_FILMES), na=False)) | (df_tmdb['vote_count'] >= MINIMO_VOTOS_RELEVANCIA)]
+
+# Ordena por relevância e extrai a fatia dos top 30% resultantes
+df_tmdb = df_tmdb.sort_values(by='vote_count', ascending=False)
+df_tmdb = df_tmdb.head(int(len(df_tmdb) * 0.30))
+print(f"Quantidade de filmes finais que subiram para o Banco: {len(df_tmdb)}")
+
+# Pools de suporte para geração de textos aleatórios
+comentarios_pool = [
+    "Excelente filme! Roteiro incrivel e final surpreendente.",
+    "Bons efeitos visuais e atuacao solida do elenco principal.",
+    "Um classico obrigatorio, vale muito a pena assistir.",
+    "Prende a atencao do inicio ao fim, recomendo fortemente.",
+    "Muito bem produzido, superou bastante as minhas expectativas.",
+    "Uma obra-prima cinematografica com excelente trilha sonora."
+]
+
+def gerar_lista_assentos(quantidade):
+    assentos = set()
+    while len(assentos) < quantidade:
+        fila = random.choice(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'])
+        num = random.randint(1, 12)
+        assentos.add(f"{fila}{num}")
+    return list(assentos)
+
+# Dicionários e contadores únicos relacionais
 map_generos = {}
 map_elenco = {}
 gen_id_counter = 100
 elenco_id_counter = 100
 
 # ==============================================================================
-# 3. LIGAÇÃO DIRETA E OPERAÇÕES NO BANCO DE DADOS
+# 3. LIGAÇÃO DIRETA E OPERAÇÕES DINÂMICAS NO BANCO DE DADOS
 # ==============================================================================
 print("\nA tentar estabelecer conexao direta com o servidor MySQL...")
 try:
@@ -104,39 +143,130 @@ try:
     cursor = conexao.cursor()
     print("Conexao direta estabelecida com sucesso!")
     
-    # Desativa checagem de chaves para permitir modificações estruturais rápidas
     cursor.execute("SET FOREIGN_KEY_CHECKS = 0;")
     
-    # [RESET] Limpeza das tabelas antes da nova carga
-    print("\n[RESET] Apagando filmes e relacionamentos antigos do banco de dados...")
-    cursor.execute("DELETE FROM `genero_filme`;")
-    cursor.execute("DELETE FROM `elenco_filme`;")
-    cursor.execute("DELETE FROM `Avalia_filme`;")
-    cursor.execute("DELETE FROM `filme`;")
+    # [RESET] Limpeza completa das tabelas afetadas para evitar duplicações
+    print("\n[RESET] Limpando tabelas para a nova carga dinamica...")
+    tabelas_limpar = ['genero_filme', 'elenco_filme', 'Avalia_filme', 'ingresso_cliente', 'ingresso', 'avalia', 'funcionarios', 'salas', 'sessao', 'filme', 'cliente', 'cinema', 'Telefone', 'Endereço']
+    for t in tabelas_limpar:
+        cursor.execute(f"DELETE FROM `{t}`;")
     conexao.commit()
-    print("[RESET] Tabelas limpas com sucesso. Pronto para a nova carga.")
     
-    # --- QUERIES CORRIGIDAS DE ACORDO COM O SEU DDL ---
-    # Alterado de id_Diretor para id_Ddiretor na tabela filme
-    query_filme = """
-    INSERT IGNORE INTO `filme` 
-    (`id_Filme`, `Titulo`, `Sinopse`, `Duracao_min`, `data_lancamento`, `Orcamento`, `Bilheteria`, `Poster_path`, `Nota_media`, `Total_votos`, `Classificacao_indicativa`, `id_Elenco`, `sessao_id_Sessao`) 
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-    """
-    # Corrigido os campos de relacionamento para bater com as minúsculas/maiúsculas do seu DDL
-    query_gen_filme = "INSERT IGNORE INTO `genero_filme` (`genero_id_Genero`, `filme_id_Filme`) VALUES (%s, %s);"
-    query_elenco_filme = "INSERT IGNORE INTO `elenco_filme` (`Elenco_id_Elenco`, `filme_id_Filme`) VALUES (%s, %s);"
+    # --- ETAPA A: INSERÇÃO DE CLIENTES BASE (20 Clientes Simulados) ---
+    query_cliente = "INSERT INTO `cliente` (`id_Cliente`, `Nome`, `Nacimento`, `Nivel_fidelidade`, `Email`, `Total_ingresso`) VALUES (%s, %s, %s, %s, %s, %s);"
+    lista_clientes = []
+    nomes_pool = ["Joao Silva", "Maria Oliveira", "Pedro Santos", "Ana Costa", "Carlos Souza", "Beatriz Lima", "Lucas Mendes", "Juliana Rocha", "Fernando Alencar", "Ricardo Sousa", "Gabriela Cruz", "Thiago Reis", "Camila Viana", "Bruno Dias", "Amanda Melo", "Rafael Guedes", "Patricia Borges", "Rodrigo Nogueira", "Larissa Freitas", "Marcelo Neto"]
+    for idx, nome in enumerate(nomes_pool, start=1):
+        lista_clientes.append((idx, nome, f"{random.randint(1980, 2005)}-03-15", random.choice(['Bronze', 'Prata', 'Ouro']), f"{nome.lower().replace(' ', '.')}@email.com", random.randint(1, 20)))
+    cursor.executemany(query_cliente, lista_clientes)
 
-    lote_filmes = []
+    # --- ETAPA B: CINEMAS E SALAS DINÂMICAS (REGRA: Entre 2 e 5 salas por cinema) ---
+    print("A estruturar cinemas e definicao dinamica de salas...")
+    cinemas_base = [
+        (1, 'SertaoFlix Central', '12345678000101', '88999991111', 'Rua Central, 100'),
+        (2, 'SertaoFlix Norte', '12345678000202', '88999992222', 'Av. Norte, 250'),
+        (3, 'SertaoFlix Sul', '12345678000303', '88999993333', 'Praca do Sul, 15'),
+        (4, 'SertaoFlix Sertao', '12345678000404', '88999994444', 'Rodovia do Sol, Km 5'),
+        (5, 'SertaoFlix Praia', '12345678000505', '88999995555', 'Av. Beira Mar, 1010')
+    ]
+    
+    salas_map = []
+    lista_cinemas_insert = []
+    id_sala_global = 1
+    id_sessao_global = 1
+
+    for c_id, c_nome, c_cnpj, c_tel, c_end in cinemas_base:
+        qnt_salas = random.randint(2, 5) # REGRA: Entre 2 e 5 salas por cinema
+        capacidade_total_cinema = 0
+        
+        for num_sala in range(1, qnt_salas + 1):
+            tamanho_sala = random.randint(100, 200)
+            capacidade_total_cinema += tamanho_sala
+            
+            salas_map.append({
+                "id_Salas": id_sala_global,
+                "Numero_Sala": num_sala,
+                "Tipo": random.choice(['IMAX', '3D', 'VIP', 'Convencional', 'MacroXE']),
+                "Tamanho": tamanho_sala,
+                "Sistema_som": random.choice(['Dolby Atmos', 'Dolby Digital', 'DTS:X', 'Stereo']),
+                "Projecao": random.choice(['Laser 4K', 'Digital', 'Laser', '4K']),
+                "Fileiras": random.randint(10, 15),
+                "Status": 'Ativa',
+                "cinema_id_Cinema": c_id,
+                "primeiro_id_sessao": id_sessao_global
+            })
+            id_sala_global += 1
+            id_sessao_global += 5 # Reserva blocos de 5 sessões obrigatórias por sala
+            
+        lista_cinemas_insert.append((c_id, c_nome, c_cnpj, c_tel, c_end, qnt_salas, capacidade_total_cinema, 1, random.choice([0,1])))
+    
+    query_cinema = "INSERT INTO `cinema` (`id_Cinema`, `Nome`, `CNPJ`, `Telefone`, `Endereco`, `Qnt_salas`, `Capacidade_total`, `Acessibilidade_PCD`, `VIP`) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);"
+    cursor.executemany(query_cinema, lista_cinemas_insert)
+
+    # --- ETAPA C: CÁLCULO DE SESSÕES (REGRA: Filme + 15 min) E OCUPAÇÃO DE INGRESSOS (50% a 90%) ---
+    print("A planejar sessoes dinamicas e lotes de ingressos comprados...")
+    lista_filmes_tmdb = df_tmdb.to_dict('records')
+    
+    sessoes_insert_lista = []
+    ingressos_insert_lote = []
+    ingresso_cliente_lote = []
+    
+    id_ingresso_counter = 1
+    id_avalia_counter = 1
+    
+    lista_avalia_lote = []
+    lista_avalia_filme_lote = []
+    
+    filme_sessao_link_map = {}
     lote_gen_filme = []
     lote_elenco_filme = []
-    TAMANHO_LOTE = 5000
-    
-    print("\nA processar e enviar lotes de dados diretamente ao banco...")
-    counter = 0
-    
-    for index, row in df_tmdb.iterrows():
-        id_Filme = int(row['id'])
+    lote_filmes = []
+
+    # Montagem da árvore estrutural correlacionada
+    for sala in salas_map:
+        sala_cap = sala['Tamanho']
+        sessao_inicial = sala['primeiro_id_sessao']
+        
+        # REGRA: Ao menos 5 sessões por sala
+        for s_offset in range(5):
+            curr_sessao_id = sessao_inicial + s_offset
+            
+            # Sorteia um filme do pool para rodar nesta sessão
+            f_escolhido = random.choice(lista_filmes_tmdb)
+            f_id = int(f_escolhido['id'])
+            
+            runtime_f = int(f_escolhido['runtime']) if f_escolhido['runtime'] != '' and not pd.isna(f_escolhido['runtime']) else 120
+            if runtime_f <= 0: runtime_f = 120
+            
+            # REGRA: Duração da sessão = Tempo de duração do filme + 15 minutos
+            duracao_sessao = runtime_f + 15 
+            
+            horario_sessao = f"2026-06-{10 + s_offset} {14 + s_offset}:00:00"
+            val_ing = random.choice([25, 30, 40])
+            desc_ing = random.choice([0, 5])
+            
+            sessoes_insert_lista.append((curr_sessao_id, duracao_sessao, horario_sessao, val_ing, desc_ing))
+            
+            if f_id not in filme_sessao_link_map:
+                filme_sessao_link_map[f_id] = curr_sessao_id
+                
+            # REGRA: Cada sala/sessão possui entre 50% e 90% de ingressos vendidos
+            pct_venda = random.uniform(0.50, 0.90)
+            qnt_ingressos_vender = int(sala_cap * pct_venda)
+            
+            assentos_gerados = gerar_lista_assentos(qnt_ingressos_vender)
+            for assento in assentos_gerados:
+                c_sorteado = random.randint(1, len(nomes_pool))
+                ingressos_insert_lote.append((id_ingresso_counter, val_ing, assento, f"2026-06-02 {random.randint(10,21)}:15:00", c_sorteado, curr_sessao_id, 'Nenhum' if desc_ing==0 else 'Estudante'))
+                ingresso_cliente_lote.append((id_ingresso_counter, c_sorteado))
+                id_ingresso_counter += 1
+
+    # --- ETAPA D: PROCESSAMENTO DOS FILMES E CRIAÇÃO DE CRÍTICAS OBRIGATÓRIAS ---
+    print("A amarrar integridade referencial e avaliacoes obrigatorias por filme...")
+    total_sessoes_geradas = id_sessao_global - 1
+
+    for idx, row in enumerate(lista_filmes_tmdb):
+        id_filme = int(row['id'])
         titulo = str(row['title']).strip()
         sinopse = str(row['overview']).strip()
         duracao = int(row['runtime']) if row['runtime'] != '' and not pd.isna(row['runtime']) else 120
@@ -147,7 +277,6 @@ try:
         
         orcamento = row['budget']
         if pd.isna(orcamento) or orcamento < 1.00: orcamento = 1500000.00
-            
         bilheteria = row['revenue']
         if pd.isna(bilheteria) or bilheteria < 0: bilheteria = 3000000.00
 
@@ -161,29 +290,33 @@ try:
         classificacao = dados_enriquecidos['rating']
         if not classificacao or classificacao == 'nan': classificacao = 'Livre'
         
-        # --- CORREÇÃO DO DIRETOR (AGORA VAI PARA A TABELA ELENCO VIA ID_ELENCO) ---
+        # Mapeamento do Diretor
         diretor_raw = dados_enriquecidos['director']
         if diretor_raw and diretor_raw != 'nan':
             diretor_principal = [d.strip() for d in diretor_raw.split(',') if d.strip()][0]
             if diretor_principal not in map_elenco:
                 map_elenco[diretor_principal] = (elenco_id_counter, 'Diretor')
                 elenco_id_counter += 1
-            
-            id_diretor_val = map_elenco[diretor_principal][0] # Esse é o id_Elenco dele
-            
-            # AMARRAÇÃO N:N: Vincula o diretor ao filme na tabela elenco_filme
-            lote_elenco_filme.append((id_diretor_val, id_Filme))
+            id_diretor_elenco = map_elenco[diretor_principal][0]
+            lote_elenco_filme.append((id_diretor_elenco, id_filme))
         else:
-            id_diretor_val = None  
+            id_diretor_elenco = None  
             
-        sessao_id = (counter % 5) + 1
+        # Determina a sessão vinculada ou calcula uma ciclicamente dentro do range gerado
+        sessao_final_id = filme_sessao_link_map.get(id_filme, (idx % total_sessoes_geradas) + 1)
         
         lote_filmes.append((
-            id_Filme, titulo, sinopse, duracao, data_formatada, 
-            round(orcamento, 2), round(bilheteria, 2), classificacao, id_diretor_val, sessao_id, 
+            id_filme, titulo, sinopse, duracao, data_formatada, 
+            round(orcamento, 2), round(bilheteria, 2), classificacao, id_diretor_elenco, sessao_final_id, 
             poster, round(nota_media, 1), total_votos
         ))
         
+        # REGRA: Cada filme cadastrado deve possuir obrigatoriamente ao menos uma avaliacao
+        c_sorteado_avalia = random.randint(1, len(nomes_pool))
+        lista_avalia_lote.append((id_avalia_counter, round(random.uniform(7.0, 10.0), 1), random.choice(comentarios_pool), c_sorteado_avalia))
+        lista_avalia_filme_lote.append((id_avalia_counter, id_filme))
+        id_avalia_counter += 1
+
         # Gêneros Relacionais (N:N)
         generos_raw = str(row['genres']).replace('|', ',')
         if generos_raw and generos_raw != 'nan':
@@ -192,9 +325,9 @@ try:
                 if g not in map_generos:
                     map_generos[g] = gen_id_counter
                     gen_id_counter += 1
-                lote_gen_filme.append((map_generos[g], id_Filme))
+                lote_gen_filme.append((map_generos[g], id_filme))
 
-        # Elenco Relacional (N:N - Atores)
+        # Elenco Relacional (N:N)
         elenco_raw = dados_enriquecidos['cast']
         if elenco_raw and elenco_raw != 'nan':
             elenco_lista = [a.strip() for a in elenco_raw.split(',') if a.strip()]
@@ -202,42 +335,80 @@ try:
                 if a not in map_elenco:
                     map_elenco[a] = (elenco_id_counter, 'Ator')
                     elenco_id_counter += 1
-                lote_elenco_filme.append((map_elenco[a][0], id_Filme))
-        
-        counter += 1
-        
-        if len(lote_filmes) >= TAMANHO_LOTE:
-            cursor.executemany(query_filme, lote_filmes)
-            cursor.executemany(query_gen_filme, lote_gen_filme)
-            cursor.executemany(query_elenco_filme, lote_elenco_filme)
-            conexao.commit()  
-            lote_filmes, lote_gen_filme, lote_elenco_filme = [], [], []
-            print(f"-> {counter} filmes enviados...")
+                lote_elenco_filme.append((map_elenco[a][0], id_filme))
 
-    if lote_filmes:
-        cursor.executemany(query_filme, lote_filmes)
-    if lote_gen_filme:
-        cursor.executemany(query_gen_filme, lote_gen_filme)
-    if lote_elenco_filme:
-        cursor.executemany(query_elenco_filme, lote_elenco_filme)
+    # --- ETAPA E: PERSISTÊNCIA COMPLETA DOS DADOS (BULK INSERTS EM ORDEM) ---
+    print("\nA enviar sessoes geradas...")
+    query_sessao = "INSERT INTO `sessao` (`id_Sessao`, `Duracao_da_sala`, `Horario`, `Valor_Ingresso`, `Desconto`) VALUES (%s, %s, %s, %s, %s);"
+    cursor.executemany(query_sessao, sessoes_insert_lista)
     conexao.commit()
-    print(f"-> Envio da massa principal finalizado. Total: {counter} filmes.")
 
-    # 4. INSERÇÃO MASSIVA NAS TABELAS DE SUPORTE (Gêneros e Elenco Unificados)
-    print("\nA enviar catalogos base de suporte (generos e elenco)...")
+    print("A enviar salas calculadas...")
+    query_sala = "INSERT INTO `salas` (`id_Salas`, `Numero_Sala`, `Tipo`, `Tamanho`, `Sistema_som`, `Projecao`, `Fileiras`, `Status`, `sessao_id_Sessao`, `cinema_id_Cinema`) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);"
+    lista_salas_insert = [(s['id_Salas'], s['Numero_Sala'], s['Tipo'], s['Tamanho'], s['Sistema_som'], s['Projecao'], s['Fileiras'], s['Status'], s['primeiro_id_sessao'], s['cinema_id_Cinema']) for s in salas_map]
+    cursor.executemany(query_sala, lista_salas_insert)
+    conexao.commit()
+
+    print("A enviar catalogo principal de filmes filtrados...")
+    query_filme = "INSERT IGNORE INTO `filme` (`id_FIlme`, `Titulo`, `Sinopse`, `Duracao_min`, `data_lancamento`, `Orcamento`, `Bilheteria`, `Classificacao_indicativa`, `id_Elenco`, `sessao_id_Sessao`, `Poster_path`, `Nota_media`, `Total_votos`) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);"
     
+    # Executa a quebra de inserção em lotes de 5000 registros para evitar estouro de pacotes do MySQL
+    TAMANHO_LOTE = 5000
+    for i in range(0, len(lote_filmes), TAMANHO_LOTE):
+        cursor.executemany(query_filme, lote_filmes[i:i+TAMANHO_LOTE])
+        conexao.commit()
+
+    print(f"A enviar bilheteria e ingressos comprados ({id_ingresso_counter - 1} registros)...")
+    query_ingresso = "INSERT INTO `ingresso` (`id_Ingresso`, `Valor`, `Assento`, `Data_de_compra`, `id_cliente`, `id_sessao`, `Tipo_Desconto`) VALUES (%s, %s, %s, %s, %s, %s, %s);"
+    for i in range(0, len(ingressos_insert_lote), TAMANHO_LOTE):
+        cursor.executemany(query_ingresso, ingressos_insert_lote[i:i+TAMANHO_LOTE])
+    
+    query_ing_cli = "INSERT INTO `ingresso_cliente` (`ingresso_id_Ingresso`, `cliente_id_Cliente`) VALUES (%s, %s);"
+    for i in range(0, len(ingresso_cliente_lote), TAMANHO_LOTE):
+        cursor.executemany(query_ing_cli, ingresso_cliente_lote[i:i+TAMANHO_LOTE])
+    conexao.commit()
+
+    print("A enviar críticas e avaliacoes obrigatorias de filmes...")
+    query_avalia = "INSERT INTO `avalia` (`id_Avalia`, `Nota`, `Comentario`, `cliente_id_Cliente`) VALUES (%s, %s, %s, %s);"
+    cursor.executemany(query_avalia, lista_avalia_lote)
+    query_avalia_filme = "INSERT INTO `Avalia_filme` (`Avalia_id_Avalia`, `filme_id_FIlme`) VALUES (%s, %s);"
+    cursor.executemany(query_avalia_filme, lista_avalia_filme_lote)
+    conexao.commit()
+
+    print("A enviar tabelas intermediarias relacionais N:N...")
+    for i in range(0, len(lote_gen_filme), TAMANHO_LOTE):
+        cursor.executemany(query_gen_filme, lote_gen_filme[i:i+TAMANHO_LOTE])
+    for i in range(0, len(lote_elenco_filme), TAMANHO_LOTE):
+        cursor.executemany(query_elenco_filme, lote_elenco_filme[i:i+TAMANHO_LOTE])
+    conexao.commit()
+
+    # --- ETAPA F: INSERÇÃO DOS CATÁLOGOS BASE E CORPO DE FUNCIONÁRIOS (COM HISTÓRICO) ---
+    print("A finalizar envio de catalogos de suporte de gêneros e elencos...")
     query_base_genero = "INSERT IGNORE INTO `genero` (`id_Genero`, `id_Filme`, `Genero`) VALUES (%s, %s, %s);"
     lista_base_genero = [(gid, 0, gen) for gen, gid in map_generos.items()]
     cursor.executemany(query_base_genero, lista_base_genero)
     
-    # Aqui os Diretores e Atores entram juntos na tabela `elenco` usando a coluna `id_Elenco`
     query_base_elenco = "INSERT IGNORE INTO `elenco` (`id_Elenco`, `Nome`, `Nascimento`, `Cargo`) VALUES (%s, %s, %s, %s);"
     lista_base_elenco = [(eid, nome, '1980-01-01', cargo) for nome, (eid, cargo) in map_elenco.items()]
     cursor.executemany(query_base_elenco, lista_base_elenco)
-    
+
+    print("A cadastrar corpo de funcionários corporativos e de historico...")
+    query_funcionarios = "INSERT INTO `funcionarios` (`id_Funcionarios`, `Nome`, `Nascimento`, `Funcao`, `Cinema`, `Genero`, `Salario`, `cinema_id_Cinema`) VALUES (%s, %s, %s, %s, %s, %s, %s, %s);"
+    funcionarios_dados = [
+        (1, 'Lucas Lima', '1994-03-10', 'Gerente', 'SertaoFlix Central', 1, 4500, 1),
+        (2, 'Beatriz Reis', '2000-09-25', 'Atendente', 'SertaoFlix Norte', 2, 1800, 2),
+        (3, 'Ricardo Rocha', '1988-12-05', 'Tecnico de Projecao', 'SertaoFlix Sul', 1, 3200, 3),
+        (4, 'Juliana Mendes', '2003-06-14', 'Bilheteira', 'SertaoFlix Sertao', 2, 1700, 4),
+        (5, 'Fernando Alencar', '1997-01-30', 'Supervisor', 'SertaoFlix Praia', 1, 2800, 5),
+        # REGRA: Dois funcionários adicionais de histórico da empresa criados abaixo
+        (6, 'Carlos Antunes (Historico)', '1975-04-12', 'Ex-Diretor Operacional', 'SertaoFlix Central', 1, 0, 1),
+        (7, 'Mariana Costa (Historico)', '1982-08-19', 'Ex-Supervisora Regional', 'SertaoFlix Praia', 2, 0, 5)
+    ]
+    cursor.executemany(query_funcionarios, funcionarios_dados)
+
     cursor.execute("SET FOREIGN_KEY_CHECKS = 1;")
     conexao.commit()
-    print("[SUCESSO GERAL] Todos os dados foram inseridos diretamente no banco MySQL!")
+    print("\n[SUCESSO COMPLETO] O banco de dados foi limpo e inteiramente populado de forma dinamica!")
 
 except mysql.connector.Error as erro:
     print(f"\nErro durante as operacoes no MySQL: {erro}")
